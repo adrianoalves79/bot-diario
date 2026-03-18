@@ -165,60 +165,84 @@ def baixar_pdf(pdf_link):
     return pdf_path
 
 
+def limpar_espacos(texto):
+    return re.sub(r"\s+", " ", str(texto or "")).strip()
+
+
+def extrair_candidato_de_linha(linha_texto):
+    linha_texto = limpar_espacos(linha_texto)
+
+    if not linha_texto:
+        return None
+
+    if "NOME DO CANDIDATO" in linha_texto.upper():
+        return None
+
+    padrao = re.compile(
+        r"^(?P<inscricao>\d+P\d+)\s+"
+        r"(?P<nome>.+?)\s+"
+        r"(?P<cpf>\d[\d\*\.]*?)\s+"
+        r"(?P<nascimento>\d{2}/\d{2}/\d{4})\s+"
+        r"(?P<nota>\d{1,2})\s+"
+        r"(?P<classificacao>\d+)\s*$"
+    )
+
+    m = padrao.match(linha_texto)
+    if not m:
+        return None
+
+    return {
+        "inscricao": limpar_espacos(m.group("inscricao")),
+        "nome": limpar_espacos(m.group("nome")),
+        "nascimento": limpar_espacos(m.group("nascimento")),
+        "nota": limpar_espacos(m.group("nota")),
+        "classificacao": limpar_espacos(m.group("classificacao")),
+    }
+
+
 def analisar_porteiro(pdf_path):
     print("📖 Lendo PDF...")
 
-    dentro_porteiro = False
     candidatos = []
+    dentro_porteiro = False
 
     with pdfplumber.open(str(pdf_path)) as pdf:
         for pagina in pdf.pages:
-            tabelas = pagina.extract_tables()
+            texto = pagina.extract_text() or ""
+            linhas = texto.splitlines()
 
-            for tabela in tabelas:
-                for linha in tabela:
-                    if not linha:
-                        continue
+            for linha in linhas:
+                linha_limpa = limpar_espacos(linha)
+                linha_upper = linha_limpa.upper()
 
-                    linha_texto = " ".join(str(c) for c in linha if c).strip()
-                    linha_upper = linha_texto.upper()
+                if "ÁREA: PORTEIRO" in linha_upper or "AREA: PORTEIRO" in linha_upper:
+                    dentro_porteiro = True
+                    continue
 
-                    if "ÁREA: PORTEIRO" in linha_upper or "AREA: PORTEIRO" in linha_upper:
-                        dentro_porteiro = True
-                        continue
+                if dentro_porteiro and (
+                    ("ÁREA:" in linha_upper or "AREA:" in linha_upper)
+                    and "PORTEIRO" not in linha_upper
+                ):
+                    dentro_porteiro = False
+                    continue
 
-                    if dentro_porteiro and ("ÁREA:" in linha_upper or "AREA:" in linha_upper) and "PORTEIRO" not in linha_upper:
-                        dentro_porteiro = False
-                        break
+                if not dentro_porteiro:
+                    continue
 
-                    if not dentro_porteiro:
-                        continue
+                candidato = extrair_candidato_de_linha(linha_limpa)
+                if candidato:
+                    candidatos.append(candidato)
 
-                    if len(linha) < 5:
-                        continue
+    unicos = []
+    vistos = set()
 
-                    inscricao = (linha[0] or "").strip() if linha[0] else ""
-                    nome = (linha[1] or "").strip() if linha[1] else ""
-                    nascimento = (linha[2] or "").strip() if linha[2] else ""
-                    nota = (linha[3] or "").strip() if linha[3] else ""
-                    classificacao = (linha[4] or "").strip() if linha[4] else ""
+    for c in candidatos:
+        chave = (c["inscricao"], c["nome"], c["classificacao"])
+        if chave not in vistos:
+            vistos.add(chave)
+            unicos.append(c)
 
-                    if not inscricao or not nome:
-                        continue
-                    if "NOME" in nome.upper():
-                        continue
-                    if not re.match(r"^\d+P\d+$", inscricao):
-                        continue
-
-                    candidatos.append({
-                        "inscricao": inscricao,
-                        "nome": nome,
-                        "nascimento": nascimento,
-                        "nota": nota,
-                        "classificacao": classificacao,
-                    })
-
-    return candidatos
+    return unicos
 
 
 def montar_mensagem_sem_convocacao(data, edicao):
