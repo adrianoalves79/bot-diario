@@ -28,6 +28,8 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 
 # ========= TESTE =========
 PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1ui-eDtGgoKt2fkb4jn-TkTBln90DcyRT"
+# Para modo normal, deixe assim:
+# PDF_TESTE = ""
 # =========================
 
 
@@ -179,7 +181,12 @@ def extrair_candidato_de_linha(linha_texto):
     if not linha_texto:
         return None
 
-    if "NOME DO CANDIDATO" in linha_texto.upper():
+    linha_upper = linha_texto.upper()
+
+    if "NOME DO CANDIDATO" in linha_upper:
+        return None
+
+    if "INSCRIÇÃO" in linha_upper or "CLASSIFICAÇÃO" in linha_upper:
         return None
 
     padrao = re.compile(
@@ -188,19 +195,22 @@ def extrair_candidato_de_linha(linha_texto):
         r"(?P<cpf>\d[\d\*\.]*?)\s+"
         r"(?P<nascimento>\d{2}/\d{2}/\d{4})\s+"
         r"(?P<nota>\d{1,2})\s+"
-        r"(?P<classificacao>\d+)\s*$"
+        r"(?P<classificacao>\d+º?|\d+o?)\s*$"
     )
 
     m = padrao.match(linha_texto)
     if not m:
         return None
 
+    classificacao = limpar_espacos(m.group("classificacao"))
+    classificacao = re.sub(r"[^\d]", "", classificacao)
+
     return {
         "inscricao": limpar_espacos(m.group("inscricao")),
         "nome": limpar_espacos(m.group("nome")),
         "nascimento": limpar_espacos(m.group("nascimento")),
         "nota": limpar_espacos(m.group("nota")),
-        "classificacao": limpar_espacos(m.group("classificacao")),
+        "classificacao": classificacao,
     }
 
 
@@ -219,14 +229,15 @@ def analisar_porteiro(pdf_path):
                 linha_limpa = limpar_espacos(linha)
                 linha_upper = linha_limpa.upper()
 
-                if "ÁREA: PORTEIRO" in linha_upper or "AREA: PORTEIRO" in linha_upper:
+                if "PORTEIRO" in linha_upper:
                     dentro_porteiro = True
                     continue
 
-                if dentro_porteiro and (
-                    ("ÁREA:" in linha_upper or "AREA:" in linha_upper)
-                    and "PORTEIRO" not in linha_upper
-                ):
+                if dentro_porteiro and "ÁREA" in linha_upper and "PORTEIRO" not in linha_upper:
+                    dentro_porteiro = False
+                    continue
+
+                if dentro_porteiro and "AREA" in linha_upper and "PORTEIRO" not in linha_upper:
                     dentro_porteiro = False
                     continue
 
@@ -311,9 +322,9 @@ def verificar_diario():
         candidatos = analisar_porteiro(pdf_path)
 
         if not candidatos:
-            mensagem = montar_mensagem_sem_convocacao("11/03/2026", "TESTE")
+            mensagem = montar_mensagem_sem_convocacao("13/03/2026", "TESTE")
         else:
-            mensagem = montar_mensagem_com_convocacao(candidatos, "11/03/2026", "TESTE")
+            mensagem = montar_mensagem_com_convocacao(candidatos, "13/03/2026", "TESTE")
 
         enviar_telegram(mensagem)
         return True
