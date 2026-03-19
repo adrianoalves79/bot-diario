@@ -27,7 +27,7 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 # ===========================
 
 # ========= TESTE =========
-PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1ui-eDtGgoKt2fkb4jn-TkTBln90DcyRT"
+PDF_TESTE = ""
 # Para modo normal, deixe:
 # PDF_TESTE = ""
 # =========================
