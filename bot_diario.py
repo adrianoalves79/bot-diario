@@ -23,7 +23,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 
 #=============TESTE MANUAL============================
-PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1ui-eDtGgoKt2fkb4jn-TkTBln90DcyRT#zoom=100&toolbar=1&navpanes=0&scrollbar=0"
+PDF_TESTE = ""
 #=====================================================
 
 def enviar_telegram(mensagem):
