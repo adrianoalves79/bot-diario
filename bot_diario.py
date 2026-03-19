@@ -322,9 +322,9 @@ def verificar_diario():
         candidatos = analisar_porteiro(pdf_path)
 
         if not candidatos:
-            mensagem = montar_mensagem_sem_convocacao("13/03/2026", "TESTE")
+            mensagem = montar_mensagem_sem_convocacao("11/03/2026", "TESTE")
         else:
-            mensagem = montar_mensagem_com_convocacao(candidatos, "13/03/2026", "TESTE")
+            mensagem = montar_mensagem_com_convocacao(candidatos, "11/03/2026", "TESTE")
 
         enviar_telegram(mensagem)
         return True
