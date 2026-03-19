@@ -28,7 +28,7 @@ CHAT_ID = os.getenv("CHAT_ID", "")
 
 # ========= TESTE =========
 PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1ui-eDtGgoKt2fkb4jn-TkTBln90DcyRT"
-# Para modo normal, deixe assim:
+# Para modo normal, deixe:
 # PDF_TESTE = ""
 # =========================
 
@@ -175,9 +175,70 @@ def limpar_espacos(texto):
     return re.sub(r"\s+", " ", str(texto or "")).strip()
 
 
+def somente_digitos(texto):
+    return re.sub(r"\D", "", str(texto or ""))
+
+
+def parece_data(texto):
+    return bool(re.fullmatch(r"\d{2}/\d{2}/\d{4}", limpar_espacos(texto)))
+
+
+def parece_inscricao(texto):
+    return bool(re.fullmatch(r"\d+P\d+", limpar_espacos(texto).upper()))
+
+
+def normalizar_classificacao(texto):
+    return re.sub(r"\D", "", limpar_espacos(texto))
+
+
+def extrair_candidato_de_tabela(linha):
+    valores = [limpar_espacos(c) for c in linha if limpar_espacos(c)]
+    if not valores:
+        return None
+
+    linha_join = " ".join(valores).upper()
+
+    if "NOME DO CANDIDATO" in linha_join:
+        return None
+
+    if not parece_inscricao(valores[0]):
+        return None
+
+    # formato comum sem CPF:
+    # [inscricao, nome, nascimento, nota, classificacao]
+    if len(valores) >= 5 and parece_data(valores[2]):
+        classificacao = normalizar_classificacao(valores[4])
+        if not classificacao:
+            return None
+
+        return {
+            "inscricao": valores[0],
+            "nome": valores[1],
+            "nascimento": valores[2],
+            "nota": somente_digitos(valores[3]) or valores[3],
+            "classificacao": classificacao,
+        }
+
+    # formato com CPF:
+    # [inscricao, nome, cpf, nascimento, nota, classificacao]
+    if len(valores) >= 6 and parece_data(valores[3]):
+        classificacao = normalizar_classificacao(valores[5])
+        if not classificacao:
+            return None
+
+        return {
+            "inscricao": valores[0],
+            "nome": valores[1],
+            "nascimento": valores[3],
+            "nota": somente_digitos(valores[4]) or valores[4],
+            "classificacao": classificacao,
+        }
+
+    return None
+
+
 def extrair_candidato_de_linha(linha_texto):
     linha_texto = limpar_espacos(linha_texto)
-
     if not linha_texto:
         return None
 
@@ -185,33 +246,51 @@ def extrair_candidato_de_linha(linha_texto):
 
     if "NOME DO CANDIDATO" in linha_upper:
         return None
-
     if "INSCRIÇÃO" in linha_upper or "CLASSIFICAÇÃO" in linha_upper:
         return None
 
-    padrao = re.compile(
+    # sem CPF
+    padrao_sem_cpf = re.compile(
         r"^(?P<inscricao>\d+P\d+)\s+"
         r"(?P<nome>.+?)\s+"
-        r"(?P<cpf>\d[\d\*\.]*?)\s+"
         r"(?P<nascimento>\d{2}/\d{2}/\d{4})\s+"
-        r"(?P<nota>\d{1,2})\s+"
-        r"(?P<classificacao>\d+º?|\d+o?)\s*$"
+        r"(?P<nota>\d{1,3})\s+"
+        r"(?P<classificacao>\d+º?|\d+o?)\s*$",
+        re.IGNORECASE
     )
 
-    m = padrao.match(linha_texto)
-    if not m:
-        return None
+    m = padrao_sem_cpf.match(linha_texto)
+    if m:
+        return {
+            "inscricao": limpar_espacos(m.group("inscricao")),
+            "nome": limpar_espacos(m.group("nome")),
+            "nascimento": limpar_espacos(m.group("nascimento")),
+            "nota": somente_digitos(m.group("nota")) or limpar_espacos(m.group("nota")),
+            "classificacao": normalizar_classificacao(m.group("classificacao")),
+        }
 
-    classificacao = limpar_espacos(m.group("classificacao"))
-    classificacao = re.sub(r"[^\d]", "", classificacao)
+    # com CPF
+    padrao_com_cpf = re.compile(
+        r"^(?P<inscricao>\d+P\d+)\s+"
+        r"(?P<nome>.+?)\s+"
+        r"(?P<cpf>\d[\d\*\.]*)\s+"
+        r"(?P<nascimento>\d{2}/\d{2}/\d{4})\s+"
+        r"(?P<nota>\d{1,3})\s+"
+        r"(?P<classificacao>\d+º?|\d+o?)\s*$",
+        re.IGNORECASE
+    )
 
-    return {
-        "inscricao": limpar_espacos(m.group("inscricao")),
-        "nome": limpar_espacos(m.group("nome")),
-        "nascimento": limpar_espacos(m.group("nascimento")),
-        "nota": limpar_espacos(m.group("nota")),
-        "classificacao": classificacao,
-    }
+    m = padrao_com_cpf.match(linha_texto)
+    if m:
+        return {
+            "inscricao": limpar_espacos(m.group("inscricao")),
+            "nome": limpar_espacos(m.group("nome")),
+            "nascimento": limpar_espacos(m.group("nascimento")),
+            "nota": somente_digitos(m.group("nota")) or limpar_espacos(m.group("nota")),
+            "classificacao": normalizar_classificacao(m.group("classificacao")),
+        }
+
+    return None
 
 
 def analisar_porteiro(pdf_path):
@@ -225,28 +304,33 @@ def analisar_porteiro(pdf_path):
             texto = pagina.extract_text() or ""
             linhas = texto.splitlines()
 
+            # controla entrada/saída da área por texto
             for linha in linhas:
                 linha_limpa = limpar_espacos(linha)
                 linha_upper = linha_limpa.upper()
 
                 if "PORTEIRO" in linha_upper:
                     dentro_porteiro = True
-                    continue
 
-                if dentro_porteiro and "ÁREA" in linha_upper and "PORTEIRO" not in linha_upper:
+                if dentro_porteiro:
+                    candidato = extrair_candidato_de_linha(linha_limpa)
+                    if candidato:
+                        candidatos.append(candidato)
+
+                if dentro_porteiro and (
+                    ("ÁREA:" in linha_upper or "AREA:" in linha_upper)
+                    and "PORTEIRO" not in linha_upper
+                ):
                     dentro_porteiro = False
-                    continue
 
-                if dentro_porteiro and "AREA" in linha_upper and "PORTEIRO" not in linha_upper:
-                    dentro_porteiro = False
-                    continue
-
-                if not dentro_porteiro:
-                    continue
-
-                candidato = extrair_candidato_de_linha(linha_limpa)
-                if candidato:
-                    candidatos.append(candidato)
+            # tenta extrair também das tabelas da página
+            if "PORTEIRO" in texto.upper():
+                tabelas = pagina.extract_tables() or []
+                for tabela in tabelas:
+                    for linha in tabela:
+                        candidato = extrair_candidato_de_tabela(linha)
+                        if candidato:
+                            candidatos.append(candidato)
 
     unicos = []
     vistos = set()
