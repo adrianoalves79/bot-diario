@@ -2,7 +2,6 @@ import json
 import os
 import re
 import time
-from datetime import datetime
 from pathlib import Path
 
 import pdfplumber
@@ -17,21 +16,15 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 URL = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial"
 ARQUIVO_ESTADO = "ultimo_diario.txt"
-ARQUIVO_CONTROLE_DIA = "controle_dia.txt"
 PASTA_DOWNLOAD = Path("downloads")
 PASTA_DOWNLOAD.mkdir(exist_ok=True)
 
-# ========= TELEGRAM =========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-# ===========================
 
-# ========= TESTE =========
-PDF_TESTE = ""
-# Para modo normal, deixe:
-# PDF_TESTE = ""
-# =========================
-
+#=============TESTE MANUAL============================
+PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1ui-eDtGgoKt2fkb4jn-TkTBln90DcyRT#zoom=100&toolbar=1&navpanes=0&scrollbar=0"
+#=====================================================
 
 def enviar_telegram(mensagem):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -52,6 +45,26 @@ def enviar_telegram(mensagem):
             print(f"⚠️ Falha ao enviar Telegram: {r.status_code} - {r.text}")
     except Exception as e:
         print("⚠️ Erro ao enviar Telegram:", e)
+
+
+def limpar(texto):
+    return re.sub(r"\s+", " ", str(texto or "")).strip()
+
+
+def somente_digitos(texto):
+    return re.sub(r"\D", "", str(texto or ""))
+
+
+def parece_data(texto):
+    return bool(re.fullmatch(r"\d{2}/\d{2}/\d{4}", limpar(texto)))
+
+
+def parece_inscricao(texto):
+    return bool(re.fullmatch(r"\d+P\d+", limpar(texto).upper()))
+
+
+def normalizar_classificacao(texto):
+    return re.sub(r"\D", "", limpar(texto))
 
 
 def obter_edicao_atual():
@@ -171,28 +184,28 @@ def baixar_pdf(pdf_link):
     return pdf_path
 
 
-def limpar_espacos(texto):
-    return re.sub(r"\s+", " ", str(texto or "")).strip()
+def extrair_cargos(pdf_path):
+    cargos = set()
 
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for pagina in pdf.pages:
+            texto = pagina.extract_text() or ""
+            linhas = texto.splitlines()
 
-def somente_digitos(texto):
-    return re.sub(r"\D", "", str(texto or ""))
+            for linha in linhas:
+                linha_limpa = limpar(linha)
+                linha_upper = linha_limpa.upper()
 
+                if "ÁREA:" in linha_upper or "AREA:" in linha_upper:
+                    cargo = re.sub(r"^.*?(ÁREA:|AREA:)\s*", "", linha_upper).strip()
+                    if cargo:
+                        cargos.add(cargo)
 
-def parece_data(texto):
-    return bool(re.fullmatch(r"\d{2}/\d{2}/\d{4}", limpar_espacos(texto)))
-
-
-def parece_inscricao(texto):
-    return bool(re.fullmatch(r"\d+P\d+", limpar_espacos(texto).upper()))
-
-
-def normalizar_classificacao(texto):
-    return re.sub(r"\D", "", limpar_espacos(texto))
+    return sorted(cargos)
 
 
 def extrair_candidato_de_tabela(linha):
-    valores = [limpar_espacos(c) for c in linha if limpar_espacos(c)]
+    valores = [limpar(c) for c in linha if limpar(c)]
     if not valores:
         return None
 
@@ -204,8 +217,6 @@ def extrair_candidato_de_tabela(linha):
     if not parece_inscricao(valores[0]):
         return None
 
-    # formato comum sem CPF:
-    # [inscricao, nome, nascimento, nota, classificacao]
     if len(valores) >= 5 and parece_data(valores[2]):
         classificacao = normalizar_classificacao(valores[4])
         if not classificacao:
@@ -219,8 +230,6 @@ def extrair_candidato_de_tabela(linha):
             "classificacao": classificacao,
         }
 
-    # formato com CPF:
-    # [inscricao, nome, cpf, nascimento, nota, classificacao]
     if len(valores) >= 6 and parece_data(valores[3]):
         classificacao = normalizar_classificacao(valores[5])
         if not classificacao:
@@ -238,7 +247,7 @@ def extrair_candidato_de_tabela(linha):
 
 
 def extrair_candidato_de_linha(linha_texto):
-    linha_texto = limpar_espacos(linha_texto)
+    linha_texto = limpar(linha_texto)
     if not linha_texto:
         return None
 
@@ -249,7 +258,6 @@ def extrair_candidato_de_linha(linha_texto):
     if "INSCRIÇÃO" in linha_upper or "CLASSIFICAÇÃO" in linha_upper:
         return None
 
-    # sem CPF
     padrao_sem_cpf = re.compile(
         r"^(?P<inscricao>\d+P\d+)\s+"
         r"(?P<nome>.+?)\s+"
@@ -262,14 +270,13 @@ def extrair_candidato_de_linha(linha_texto):
     m = padrao_sem_cpf.match(linha_texto)
     if m:
         return {
-            "inscricao": limpar_espacos(m.group("inscricao")),
-            "nome": limpar_espacos(m.group("nome")),
-            "nascimento": limpar_espacos(m.group("nascimento")),
-            "nota": somente_digitos(m.group("nota")) or limpar_espacos(m.group("nota")),
+            "inscricao": limpar(m.group("inscricao")),
+            "nome": limpar(m.group("nome")),
+            "nascimento": limpar(m.group("nascimento")),
+            "nota": somente_digitos(m.group("nota")) or limpar(m.group("nota")),
             "classificacao": normalizar_classificacao(m.group("classificacao")),
         }
 
-    # com CPF
     padrao_com_cpf = re.compile(
         r"^(?P<inscricao>\d+P\d+)\s+"
         r"(?P<nome>.+?)\s+"
@@ -283,10 +290,10 @@ def extrair_candidato_de_linha(linha_texto):
     m = padrao_com_cpf.match(linha_texto)
     if m:
         return {
-            "inscricao": limpar_espacos(m.group("inscricao")),
-            "nome": limpar_espacos(m.group("nome")),
-            "nascimento": limpar_espacos(m.group("nascimento")),
-            "nota": somente_digitos(m.group("nota")) or limpar_espacos(m.group("nota")),
+            "inscricao": limpar(m.group("inscricao")),
+            "nome": limpar(m.group("nome")),
+            "nascimento": limpar(m.group("nascimento")),
+            "nota": somente_digitos(m.group("nota")) or limpar(m.group("nota")),
             "classificacao": normalizar_classificacao(m.group("classificacao")),
         }
 
@@ -304,9 +311,8 @@ def analisar_porteiro(pdf_path):
             texto = pagina.extract_text() or ""
             linhas = texto.splitlines()
 
-            # controla entrada/saída da área por texto
             for linha in linhas:
-                linha_limpa = limpar_espacos(linha)
+                linha_limpa = limpar(linha)
                 linha_upper = linha_limpa.upper()
 
                 if "PORTEIRO" in linha_upper:
@@ -323,7 +329,6 @@ def analisar_porteiro(pdf_path):
                 ):
                     dentro_porteiro = False
 
-            # tenta extrair também das tabelas da página
             if "PORTEIRO" in texto.upper():
                 tabelas = pagina.extract_tables() or []
                 for tabela in tabelas:
@@ -349,51 +354,40 @@ def montar_mensagem_sem_convocacao(data, edicao):
         "🚨 Novo Diário Oficial detectado\n\n"
         f"📅 Data: {data}\n"
         f"📄 Edição: {edicao}\n\n"
-        "⚠️ Não houve convocação para o cargo de PORTEIRO neste diário."
+        "⚠️ Não houve convocação neste diário."
     )
 
 
-def montar_mensagem_com_convocacao(candidatos, data, edicao):
+def montar_mensagem_com_cargos(cargos, candidatos_porteiro, data, edicao):
     mensagem = (
-        "🚨 NOVO DIÁRIO DETECTADO!\n"
-        "✅ Convocação para PORTEIRO encontrada\n\n"
+        "🚨 NOVO DIÁRIO DETECTADO!\n\n"
         f"📅 Data: {data}\n"
         f"📄 Edição: {edicao}\n\n"
+        "📌 Houve convocação para os cargos:\n"
     )
 
-    for i, c in enumerate(candidatos, start=1):
+    for cargo in cargos:
+        mensagem += f"- {cargo}\n"
+
+    if candidatos_porteiro:
+        mensagem += "\n✅ Detalhes de PORTEIRO\n\n"
+
+        for i, c in enumerate(candidatos_porteiro, start=1):
+            mensagem += (
+                f"{i})\n"
+                f"INSCRIÇÃO: {c['inscricao']}\n"
+                f"NOME: {c['nome']}\n"
+                f"NOTA DE TÍTULOS: {c['nota']}\n"
+                f"CLASSIFICAÇÃO: {c['classificacao']}\n\n"
+            )
+
         mensagem += (
-            f"{i})\n"
-            f"INSCRIÇÃO: {c['inscricao']}\n"
-            f"NOME: {c['nome']}\n"
-            f"NOTA DE TÍTULOS: {c['nota']}\n"
-            f"CLASSIFICAÇÃO: {c['classificacao']}\n\n"
+            "📊 RESUMO PORTEIRO\n"
+            f"Total convocados: {len(candidatos_porteiro)}\n"
+            f"Última classificação chamada: {candidatos_porteiro[-1]['classificacao']}"
         )
 
-    mensagem += (
-        "📊 RESUMO PORTEIRO\n"
-        f"Total convocados: {len(candidatos)}\n"
-        f"Última classificação chamada: {candidatos[-1]['classificacao']}"
-    )
-
     return mensagem
-
-
-def ja_processou_hoje():
-    if not os.path.exists(ARQUIVO_CONTROLE_DIA):
-        return False
-
-    with open(ARQUIVO_CONTROLE_DIA, "r", encoding="utf-8") as f:
-        data = f.read().strip()
-
-    hoje = datetime.now().strftime("%d/%m/%Y")
-    return data == hoje
-
-
-def marcar_processado_hoje():
-    hoje = datetime.now().strftime("%d/%m/%Y")
-    with open(ARQUIVO_CONTROLE_DIA, "w", encoding="utf-8") as f:
-        f.write(hoje)
 
 
 def verificar_diario():
@@ -401,21 +395,17 @@ def verificar_diario():
 
     if PDF_TESTE:
         print("🧪 MODO TESTE ATIVADO")
-
         pdf_path = baixar_pdf(PDF_TESTE)
-        candidatos = analisar_porteiro(pdf_path)
+        cargos = extrair_cargos(pdf_path)
+        candidatos_porteiro = analisar_porteiro(pdf_path)
 
-        if not candidatos:
-            mensagem = montar_mensagem_sem_convocacao("11/03/2026", "TESTE")
+        if not cargos:
+            mensagem = montar_mensagem_sem_convocacao("TESTE", "TESTE")
         else:
-            mensagem = montar_mensagem_com_convocacao(candidatos, "11/03/2026", "TESTE")
+            mensagem = montar_mensagem_com_cargos(cargos, candidatos_porteiro, "TESTE", "TESTE")
 
         enviar_telegram(mensagem)
         return True
-
-    if ja_processou_hoje():
-        print("✅ Já processado hoje. Encerrando execução.")
-        return False
 
     edicao, data = obter_edicao_atual()
 
@@ -446,34 +436,16 @@ def verificar_diario():
     with open(ARQUIVO_ESTADO, "w", encoding="utf-8") as f:
         f.write(atual)
 
-    candidatos = analisar_porteiro(pdf_path)
+    cargos = extrair_cargos(pdf_path)
+    candidatos_porteiro = analisar_porteiro(pdf_path)
 
-    print("\n📊 RESULTADO")
-
-    if not candidatos:
-        print("⚠️ Não houve convocação para o cargo de PORTEIRO neste diário.")
+    if not cargos:
         mensagem = montar_mensagem_sem_convocacao(data, edicao)
         enviar_telegram(mensagem)
-        marcar_processado_hoje()
         return True
 
-    print("\n🚪 CANDIDATOS - PORTEIRO\n")
-    for c in candidatos:
-        print("================================")
-        print("Nº DE INSCRIÇÃO:", c["inscricao"])
-        print("NOME:", c["nome"])
-        print("DATA DE NASCIMENTO:", c["nascimento"])
-        print("NOTA DE TÍTULOS:", c["nota"])
-        print("CLASSIFICAÇÃO:", c["classificacao"])
-
-    print("\n📊 RESUMO PORTEIRO")
-    print("----------------------------")
-    print("Total convocados:", len(candidatos))
-    print("Última classificação chamada:", candidatos[-1]["classificacao"])
-
-    mensagem = montar_mensagem_com_convocacao(candidatos, data, edicao)
+    mensagem = montar_mensagem_com_cargos(cargos, candidatos_porteiro, data, edicao)
     enviar_telegram(mensagem)
-    marcar_processado_hoje()
     return True
 
 
