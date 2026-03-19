@@ -26,6 +26,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 # ===========================
 
+# ========= TESTE =========
+PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1ui-eDtGgoKt2fkb4jn-TkTBln90DcyRT"
+# =========================
+
 
 def enviar_telegram(mensagem):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -300,6 +304,20 @@ def marcar_processado_hoje():
 def verificar_diario():
     print("\n🔎 Verificando Diário Oficial...")
 
+    if PDF_TESTE:
+        print("🧪 MODO TESTE ATIVADO")
+
+        pdf_path = baixar_pdf(PDF_TESTE)
+        candidatos = analisar_porteiro(pdf_path)
+
+        if not candidatos:
+            mensagem = montar_mensagem_sem_convocacao("11/03/2026", "TESTE")
+        else:
+            mensagem = montar_mensagem_com_convocacao(candidatos, "11/03/2026", "TESTE")
+
+        enviar_telegram(mensagem)
+        return True
+
     if ja_processou_hoje():
         print("✅ Já processado hoje. Encerrando execução.")
         return False
@@ -333,8 +351,6 @@ def verificar_diario():
     with open(ARQUIVO_ESTADO, "w", encoding="utf-8") as f:
         f.write(atual)
 
-    marcar_processado_hoje()
-
     candidatos = analisar_porteiro(pdf_path)
 
     print("\n📊 RESULTADO")
@@ -343,6 +359,7 @@ def verificar_diario():
         print("⚠️ Não houve convocação para o cargo de PORTEIRO neste diário.")
         mensagem = montar_mensagem_sem_convocacao(data, edicao)
         enviar_telegram(mensagem)
+        marcar_processado_hoje()
         return True
 
     print("\n🚪 CANDIDATOS - PORTEIRO\n")
@@ -361,6 +378,7 @@ def verificar_diario():
 
     mensagem = montar_mensagem_com_convocacao(candidatos, data, edicao)
     enviar_telegram(mensagem)
+    marcar_processado_hoje()
     return True
 
 
