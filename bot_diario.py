@@ -6,12 +6,14 @@ from urllib.parse import urljoin
 
 import pdfplumber
 import requests
+from requests.adapters import HTTPAdapter
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from urllib3.util.retry import Retry
 from webdriver_manager.chrome import ChromeDriverManager
 
 URL = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial"
@@ -70,13 +72,32 @@ def normalizar_classificacao(texto):
     return re.sub(r"\D", "", limpar(texto))
 
 
-def obter_edicao_atual():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(URL, headers=headers, timeout=30)
-    html = r.text
+def criar_sessao_http():
+    sess = requests.Session()
 
+    retry = Retry(
+        total=4,
+        connect=4,
+        read=4,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD"]
+    )
+
+    adapter = HTTPAdapter(max_retries=retry)
+    sess.mount("http://", adapter)
+    sess.mount("https://", adapter)
+
+    sess.headers.update({
+        "User-Agent": "Mozilla/5.0"
+    })
+
+    return sess
+
+
+def extrair_edicao_data_do_html(html):
     m_edicao = re.search(r"Diário Oficial Nº\s*([0-9]+/[0-9]+)", html, re.IGNORECASE)
-    m_data = re.search(r"(\d{2}/\d{2}/\d{4})", html)
+    m_data = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", html)
 
     if not m_edicao or not m_data:
         return None, None
@@ -100,6 +121,41 @@ def criar_driver():
     return driver
 
 
+def obter_edicao_atual():
+    try:
+        sess = criar_sessao_http()
+        r = sess.get(URL, timeout=(20, 90))
+        r.raise_for_status()
+
+        edicao, data = extrair_edicao_data_do_html(r.text)
+        if edicao and data:
+            return edicao, data
+
+        print("⚠️ Requests abriu a página, mas não encontrou edição/data. Tentando via Selenium...")
+    except Exception as e:
+        print(f"⚠️ Falha no requests para obter edição atual: {e}")
+        print("🔁 Tentando obter edição atual via Selenium...")
+
+    driver = criar_driver()
+    try:
+        driver.get(URL)
+        wait = WebDriverWait(driver, 45)
+        wait.until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//*[contains(., 'Diário Oficial Nº')]")
+            )
+        )
+
+        html = driver.page_source
+        edicao, data = extrair_edicao_data_do_html(html)
+        if edicao and data:
+            return edicao, data
+
+        raise RuntimeError("Página carregou, mas não foi possível extrair edição/data.")
+    finally:
+        driver.quit()
+
+
 def baixar_pdf(url_pdf):
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -107,7 +163,8 @@ def baixar_pdf(url_pdf):
         "Accept": "application/pdf,application/octet-stream,*/*",
     }
 
-    r = requests.get(url_pdf, headers=headers, timeout=60, allow_redirects=True)
+    sess = criar_sessao_http()
+    r = sess.get(url_pdf, headers=headers, timeout=(20, 120), allow_redirects=True)
 
     if r.status_code != 200:
         raise RuntimeError(f"Falha ao baixar PDF. Status: {r.status_code}")
@@ -206,9 +263,12 @@ def localizar_pdf_na_pagina(driver):
     vistos = set()
     unicos = []
     for c in candidatos:
-        if c not in vistos:
-            vistos.add(c)
-            unicos.append(c)
+        c_limpo = c.split("#")[0].strip()
+        if c_limpo not in vistos:
+            vistos.add(c_limpo)
+            unicos.append(c_limpo)
+
+    unicos.sort(key=lambda x: (".pdf" not in x.lower(), len(x)))
 
     print("🔍 Candidatos encontrados na página:")
     for c in unicos:
@@ -227,7 +287,7 @@ def baixar_primeiro_pdf_valido(driver, candidatos):
         "Accept": "application/pdf,application/octet-stream,*/*",
     }
 
-    sess = requests.Session()
+    sess = criar_sessao_http()
 
     for cookie in driver.get_cookies():
         sess.cookies.set(cookie["name"], cookie["value"])
@@ -236,8 +296,10 @@ def baixar_primeiro_pdf_valido(driver, candidatos):
 
     for link in candidatos:
         try:
+            link = link.split("#")[0].strip()
+
             print(f"📥 Tentando baixar: {link}")
-            r = sess.get(link, headers=headers, timeout=60, allow_redirects=True)
+            r = sess.get(link, headers=headers, timeout=(20, 120), allow_redirects=True)
 
             content_type = (r.headers.get("Content-Type") or "").lower()
 
@@ -483,7 +545,11 @@ def verificar_diario():
         enviar_telegram(mensagem)
         return True
 
-    edicao, data = obter_edicao_atual()
+    try:
+        edicao, data = obter_edicao_atual()
+    except Exception as e:
+        print(f"❌ Não foi possível obter a edição atual: {e}")
+        return False
 
     if not edicao or not data:
         print("❌ Não foi possível identificar a edição atual no site.")
