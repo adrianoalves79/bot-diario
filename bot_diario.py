@@ -22,9 +22,10 @@ PASTA_DOWNLOAD.mkdir(exist_ok=True)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 
-#=============TESTE MANUAL============================
+# =============TESTE MANUAL============================
 PDF_TESTE = ""
-#=====================================================
+# =====================================================
+
 
 def enviar_telegram(mensagem):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -98,84 +99,173 @@ def criar_driver():
     return driver
 
 
-def extrair_pdf_apos_clicar():
-    driver = criar_driver()
-    try:
-        print("🌐 Abrindo site...")
-        driver.get(URL)
+def extrair_pdf_apos_clicar(driver):
+    print("🌐 Abrindo site...")
+    driver.get(URL)
 
-        wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 30)
 
-        print("⏳ Aguardando botão Download...")
-        botao = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//*[contains(normalize-space(.), 'Download')]")
-            )
+    print("⏳ Aguardando botão Download...")
+    botao = wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//*[contains(normalize-space(.), 'Download')]")
         )
+    )
 
+    pdf_link = None
+
+    # 1) Tenta pegar href diretamente do elemento
+    try:
+        href = botao.get_attribute("href")
+        if href and ".pdf" in href.lower():
+            pdf_link = href
+    except Exception:
+        pass
+
+    # 2) Tenta olhar link pai/filho via JS
+    if not pdf_link:
         try:
-            driver.get_log("performance")
+            href = driver.execute_script("""
+                const el = arguments[0];
+                if (!el) return null;
+
+                if (el.href) return el.href;
+
+                const a1 = el.closest('a');
+                if (a1 && a1.href) return a1.href;
+
+                const a2 = el.querySelector && el.querySelector('a');
+                if (a2 && a2.href) return a2.href;
+
+                return null;
+            """, botao)
+            if href and ".pdf" in href.lower():
+                pdf_link = href
         except Exception:
             pass
 
-        print("📥 Clicando em Download...")
-        driver.execute_script("arguments[0].click();", botao)
+    # 3) Limpa logs antigos antes do clique
+    try:
+        driver.get_log("performance")
+    except Exception:
+        pass
 
-        time.sleep(6)
+    print("📥 Clicando em Download...")
+    driver.execute_script("arguments[0].click();", botao)
+    time.sleep(8)
 
-        pdf_link = None
-        logs = driver.get_log("performance")
+    # 4) Captura qualquer URL parecida com PDF nos logs
+    if not pdf_link:
+        try:
+            logs = driver.get_log("performance")
+            candidatos = []
 
-        for entry in logs:
-            try:
-                msg = json.loads(entry["message"])["message"]
-                method = msg.get("method", "")
+            for entry in logs:
+                try:
+                    msg = json.loads(entry["message"])["message"]
+                    method = msg.get("method", "")
+                    params = msg.get("params", {})
 
-                if method not in ("Network.requestWillBeSent", "Network.responseReceived"):
+                    if method == "Network.requestWillBeSent":
+                        req_url = params.get("request", {}).get("url", "")
+                        if ".pdf" in req_url.lower() or "diario" in req_url.lower():
+                            candidatos.append(req_url)
+
+                    elif method == "Network.responseReceived":
+                        response = params.get("response", {})
+                        resp_url = response.get("url", "")
+                        mime = (response.get("mimeType") or "").lower()
+                        if ".pdf" in resp_url.lower() or "pdf" in mime:
+                            candidatos.append(resp_url)
+
+                except Exception:
                     continue
 
-                params = msg.get("params", {})
+            for url in candidatos:
+                if ".pdf" in url.lower():
+                    pdf_link = url
+                    break
 
-                req = params.get("request", {})
-                req_url = req.get("url", "")
-                if "diario?n=diario.pdf" in req_url:
-                    pdf_link = req_url
+            if not pdf_link and candidatos:
+                pdf_link = candidatos[-1]
 
-                resp = params.get("response", {})
-                resp_url = resp.get("url", "")
-                if "diario?n=diario.pdf" in resp_url:
-                    pdf_link = resp_url
+        except Exception:
+            pass
 
-            except Exception:
-                continue
+    # 5) Última tentativa: procurar URL .pdf no HTML
+    if not pdf_link:
+        try:
+            html = driver.page_source
+            encontrados = re.findall(
+                r'https?://[^"\']+\.pdf[^"\']*',
+                html,
+                flags=re.IGNORECASE
+            )
+            if encontrados:
+                pdf_link = encontrados[0]
+        except Exception:
+            pass
 
-        if not pdf_link:
-            raise RuntimeError("Não foi possível capturar a URL real do PDF após clicar em Download.")
+    if not pdf_link:
+        raise RuntimeError("Não foi possível localizar a URL do PDF após clicar em Download.")
 
-        pdf_link = pdf_link.replace("&amp;", "&").split("#")[0]
+    pdf_link = pdf_link.replace("&amp;", "&").split("#")[0].strip()
 
-        print("📄 URL real do PDF:")
-        print(pdf_link)
+    print("📄 URL encontrada do PDF:")
+    print(pdf_link)
 
-        return pdf_link
-
-    finally:
-        driver.quit()
+    return pdf_link
 
 
 def baixar_pdf(pdf_link):
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": URL,
+        "Accept": "application/pdf,application/octet-stream,*/*",
     }
 
-    r = requests.get(pdf_link, headers=headers, timeout=60)
+    r = requests.get(pdf_link, headers=headers, timeout=60, allow_redirects=True)
 
     if r.status_code != 200:
         raise RuntimeError(f"Falha ao baixar PDF. Status: {r.status_code}")
 
-    if not r.content.startswith(b"%PDF"):
-        raise RuntimeError("O arquivo recebido não é um PDF válido.")
+    content_type = r.headers.get("Content-Type", "").lower()
+
+    if not r.content.startswith(b"%PDF") and "pdf" not in content_type:
+        raise RuntimeError(
+            f"O arquivo recebido não parece ser um PDF válido. Content-Type: {content_type}"
+        )
+
+    pdf_path = PASTA_DOWNLOAD / "diario_atual.pdf"
+    with open(pdf_path, "wb") as f:
+        f.write(r.content)
+
+    return pdf_path
+
+
+def baixar_pdf_com_sessao(driver, pdf_link):
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": URL,
+        "Accept": "application/pdf,application/octet-stream,*/*",
+    }
+
+    sess = requests.Session()
+
+    for cookie in driver.get_cookies():
+        sess.cookies.set(cookie["name"], cookie["value"])
+
+    r = sess.get(pdf_link, headers=headers, timeout=60, allow_redirects=True)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Falha ao baixar PDF. Status: {r.status_code}")
+
+    content_type = r.headers.get("Content-Type", "").lower()
+
+    if not r.content.startswith(b"%PDF") and "pdf" not in content_type:
+        raise RuntimeError(
+            f"O arquivo recebido não parece ser um PDF válido. Content-Type: {content_type}"
+        )
 
     pdf_path = PASTA_DOWNLOAD / "diario_atual.pdf"
     with open(pdf_path, "wb") as f:
@@ -428,8 +518,12 @@ def verificar_diario():
 
     print("🚨 NOVO DIÁRIO DETECTADO!")
 
-    pdf_link = extrair_pdf_apos_clicar()
-    pdf_path = baixar_pdf(pdf_link)
+    driver = criar_driver()
+    try:
+        pdf_link = extrair_pdf_apos_clicar(driver)
+        pdf_path = baixar_pdf_com_sessao(driver, pdf_link)
+    finally:
+        driver.quit()
 
     print("✅ PDF baixado:", pdf_path)
 
