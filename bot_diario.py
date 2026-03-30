@@ -25,7 +25,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 
 # ============= TESTE MANUAL ============================
-PDF_TESTE = ""
+PDF_TESTE = "https://municipioonline.com.br/se/prefeitura/simaodias/cidadao/diariooficial/diario?n=diario.pdf&l=1yLcLsKZg0teymox5clbgrdWSMTTttsW2#zoom=100&toolbar=1&navpanes=0&scrollbar=0"
 # Exemplo:
 # PDF_TESTE = "https://site.com/arquivo.pdf"
 # ======================================================
