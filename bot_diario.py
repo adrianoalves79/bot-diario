@@ -76,15 +76,16 @@ def criar_sessao_http():
     sess = requests.Session()
 
     retry = Retry(
-        total=4,
-        connect=4,
-        read=4,
+        total=5,
+        connect=5,
+        read=5,
         backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "HEAD"]
+        allowed_methods=["GET", "HEAD"],
+        raise_on_status=False,
     )
 
-    adapter = HTTPAdapter(max_retries=retry)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     sess.mount("http://", adapter)
     sess.mount("https://", adapter)
 
@@ -164,21 +165,28 @@ def baixar_pdf(url_pdf):
     }
 
     sess = criar_sessao_http()
-    r = sess.get(url_pdf, headers=headers, timeout=(20, 120), allow_redirects=True)
+    with sess.get(url_pdf, headers=headers, timeout=(30, 180), allow_redirects=True, stream=True) as r:
+        if r.status_code != 200:
+            raise RuntimeError(f"Falha ao baixar PDF. Status: {r.status_code}")
 
-    if r.status_code != 200:
-        raise RuntimeError(f"Falha ao baixar PDF. Status: {r.status_code}")
+        content_type = (r.headers.get("Content-Type") or "").lower()
+        pdf_path = PASTA_DOWNLOAD / "diario_atual.pdf"
 
-    content_type = (r.headers.get("Content-Type") or "").lower()
+        with open(pdf_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
 
-    if not r.content.startswith(b"%PDF") and "pdf" not in content_type:
+    if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+        raise RuntimeError("Arquivo PDF baixado ficou vazio.")
+
+    with open(pdf_path, "rb") as f:
+        cabecalho = f.read(5)
+
+    if cabecalho != b"%PDF-" and "pdf" not in content_type:
         raise RuntimeError(
             f"O arquivo recebido não parece ser um PDF válido. Content-Type: {content_type}"
         )
-
-    pdf_path = PASTA_DOWNLOAD / "diario_atual.pdf"
-    with open(pdf_path, "wb") as f:
-        f.write(r.content)
 
     return pdf_path
 
@@ -280,11 +288,12 @@ def localizar_pdf_na_pagina(driver):
     return unicos
 
 
-def baixar_primeiro_pdf_valido(driver, candidatos):
-    headers = {
+def baixar_primeiro_pdf_valido(driver, candidatos, tentativas_por_link=3):
+    headers_base = {
         "User-Agent": "Mozilla/5.0",
         "Referer": URL,
         "Accept": "application/pdf,application/octet-stream,*/*",
+        "Connection": "keep-alive",
     }
 
     sess = criar_sessao_http()
@@ -295,29 +304,77 @@ def baixar_primeiro_pdf_valido(driver, candidatos):
     ultimo_erro = None
 
     for link in candidatos:
-        try:
-            link = link.split("#")[0].strip()
+        link = link.split("#")[0].strip()
 
-            print(f"📥 Tentando baixar: {link}")
-            r = sess.get(link, headers=headers, timeout=(20, 120), allow_redirects=True)
+        for tentativa in range(1, tentativas_por_link + 1):
+            try:
+                print(f"📥 Tentando baixar: {link} (tentativa {tentativa}/{tentativas_por_link})")
 
-            content_type = (r.headers.get("Content-Type") or "").lower()
-
-            if r.status_code == 200 and (
-                r.content.startswith(b"%PDF") or "pdf" in content_type
-            ):
                 pdf_path = PASTA_DOWNLOAD / "diario_atual.pdf"
-                with open(pdf_path, "wb") as f:
-                    f.write(r.content)
+                if pdf_path.exists():
+                    try:
+                        pdf_path.unlink()
+                    except Exception:
+                        pass
+
+                with sess.get(
+                    link,
+                    headers=headers_base,
+                    timeout=(30, 180),
+                    allow_redirects=True,
+                    stream=True
+                ) as r:
+                    content_type = (r.headers.get("Content-Type") or "").lower()
+                    status = r.status_code
+
+                    if status != 200:
+                        print(f"⚠️ Status inválido: {status}")
+                        continue
+
+                    if "pdf" not in content_type and "octet-stream" not in content_type:
+                        print(f"⚠️ Content-Type suspeito: {content_type}")
+
+                    total_bytes = 0
+                    with open(pdf_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+                                total_bytes += len(chunk)
+
+                if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+                    raise RuntimeError("Arquivo baixado ficou vazio.")
+
+                with open(pdf_path, "rb") as f:
+                    cabecalho = f.read(5)
+
+                if cabecalho != b"%PDF-":
+                    with open(pdf_path, "rb") as f:
+                        inicio = f.read(200).decode("latin-1", errors="ignore").lower()
+
+                    if "<html" in inicio or "<!doctype" in inicio:
+                        raise RuntimeError("Servidor retornou HTML em vez de PDF.")
+
+                    raise RuntimeError("Arquivo baixado não começa com cabeçalho PDF válido.")
 
                 print(f"✅ PDF válido encontrado: {link}")
+                print(f"📦 Tamanho baixado: {total_bytes} bytes")
                 return pdf_path
 
-            print(f"⚠️ Não era PDF: status={r.status_code} content-type={content_type}")
+            except Exception as e:
+                ultimo_erro = e
+                print(f"⚠️ Falha ao tentar {link} na tentativa {tentativa}: {e}")
+                time.sleep(3)
 
-        except Exception as e:
-            ultimo_erro = e
-            print(f"⚠️ Falha ao tentar {link}: {e}")
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+
+                sess = criar_sessao_http()
+                for cookie in driver.get_cookies():
+                    sess.cookies.set(cookie["name"], cookie["value"])
+
+                continue
 
     raise RuntimeError(f"Nenhum candidato resultou em PDF válido. Último erro: {ultimo_erro}")
 
@@ -600,4 +657,3 @@ if __name__ == "__main__":
         verificar_diario()
     except Exception as e:
         print("❌ Erro:", e)
-        raise
